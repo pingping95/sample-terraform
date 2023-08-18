@@ -50,7 +50,11 @@ loki:
   # -- Common labels for all pods
   podLabels: {}
   # -- Common annotations for all pods
-  podAnnotations: {}
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: "/metrics"
+    prometheus.io/port: "3100"
+
   # -- Common command override for all pods (except gateway)
   command: null
   # -- The number of old ReplicaSets to retain to allow rollback
@@ -74,6 +78,10 @@ loki:
   appProtocol: ""
   # -- Common annotations for all loki services
   serviceAnnotations: {}
+#    prometheus.io/scrape: "true"
+#    prometheus.io/path: "/metrics"
+#    prometheus.io/port: "3100"
+
   # Loki server configuration
   # Refers to https://grafana.com/docs/loki/latest/configuration/#server
   server:
@@ -87,63 +95,12 @@ loki:
     
     ballast_bytes: 20480
 
-    server:
-      http_listen_port: 3100
-      grpc_server_max_recv_msg_size: 104857600  # 100 Mb
-      grpc_server_max_send_msg_size: 104857600  # 100 Mb
-      http_server_write_timeout: 310s
-      http_server_read_timeout: 310s
-
     common:
       compactor_address: http://{{ include "loki.compactorFullname" . }}:3100
-
-    querier:
-      query_timeout: 300s
-      max_concurrent: 6
-      engine:
-        timeout: 300s
-
-    distributor:
-      ring:
-        kvstore:
-          store: memberlist
 
     memberlist:
       join_members:
         - {{ include "loki.fullname" . }}-memberlist
-
-    ingester:
-      lifecycler:
-        ring:
-          kvstore:
-            store: memberlist
-          replication_factor: 3
-      chunk_retain_period: 1m
-      chunk_idle_period: 2h
-      chunk_target_size: 1536000
-      max_chunk_age: 2h
-      chunk_block_size: 262144
-      chunk_encoding: snappy
-      wal:
-        dir: /var/loki/wal
-        enabled: true
-        replay_memory_ceiling: 10GB
-
-    limits_config:
-      max_query_parallelism: 18
-      split_queries_by_interval: 15m
-      enforce_metric_name: false
-      reject_old_samples: true
-      reject_old_samples_max_age: 336h
-      retention_period: 336h
-      ingestion_rate_mb: 20
-      ingestion_burst_size_mb: 30
-      enforce_metric_name: false
-      per_stream_rate_limit: 3MB
-      per_stream_rate_limit_burst: 10MB
-      max_streams_matchers_per_query: 400
-      max_query_series: 400
-      max_chunks_per_query: 700000
 
     {{- if .Values.loki.schemaConfig}}
     schema_config:
@@ -184,22 +141,7 @@ loki:
           addresses: dnssrv+_memcached-client._tcp.{{ include "loki.memcachedIndexWritesFullname" . }}.{{ .Release.Namespace }}.svc.{{ .Values.global.clusterDomain }}
       {{- end }}
 
-    table_manager:
-      retention_deletes_enabled: false
-
-    query_range:
-      align_queries_with_step: true
-      max_retries: 5
-      cache_results: true
-      results_cache:
-        cache:
-          embedded_cache:
-            enabled: true
-            max_size_mb: 1024
-            ttl: 24h
-
     frontend_worker:
-      match_max_concurrent: true
       {{- if .Values.queryScheduler.enabled }}
       scheduler_address: {{ include "loki.querySchedulerFullname" . }}:9095
       {{- else }}
@@ -212,24 +154,6 @@ loki:
       {{- if .Values.queryScheduler.enabled }}
       scheduler_address: {{ include "loki.querySchedulerFullname" . }}:9095
       {{- end }}
-      tail_proxy_url: http://{{ include "loki.querierFullname" . }}:3100
-      # downstream_url: http://loki-distributed-querier.monitoring.svc.cluster.local:3100
-
-    compactor:
-      shared_store: s3
-      retention_delete_delay: 2h
-      retention_enabled: true
-      working_directory: /data/retention
-
-    ruler:
-      storage:
-        type: local
-        local:
-          directory: /etc/loki/rules
-      ring:
-        kvstore:
-          store: memberlist
-      rule_path: /tmp/loki/scratch
 
   # -- Check https://grafana.com/docs/loki/latest/configuration/#schema_config for more info on how to configure schemas
   schemaConfig:
@@ -247,7 +171,7 @@ loki:
     aws:
       s3forcepathstyle: true
       region: ap-northeast-2
-      bucketnames: my-bucket-name
+      bucketnames: xxxx-xxxx-loki
       insecure: false
       sse_encryption: true
     tsdb_shipper:
@@ -259,7 +183,171 @@ loki:
       cache_ttl: 24h
 
   # -- Structured loki configuration, takes precedence over `loki.config`, `loki.schemaConfig`, `loki.storageConfig`
-  structuredConfig: {}
+  structuredConfig:
+
+    # Common
+    common:
+      ring:
+        kvstore:
+          store: memberlist
+
+    # Server
+    server:
+      http_listen_port: 3100
+      # Message 크기 설정
+      grpc_server_max_recv_msg_size: 104857600  # 100 Mb
+      grpc_server_max_send_msg_size: 104857600  # 100 Mb
+
+      http_server_write_timeout: 310s
+      http_server_read_timeout: 310s
+
+
+    ## Limit
+    limits_config:
+      # 동시성 설정
+      # queriers * max_concurrent >= max_query_parallelism
+      # 3 * 7 = 21
+      max_query_parallelism: 21
+      split_queries_by_interval: 15m
+
+      enforce_metric_name: false
+
+      reject_old_samples: true
+      reject_old_samples_max_age: 24h
+
+      # 그 외 : 1달 보관
+      retention_period: 672h
+
+      # Dev, QA, Stage : 7일 보관
+      retention_stream:
+        - selector: '{env="dev"}'
+          priority: 1
+          period: 168h
+        - selector: '{env="qa"}'
+          priority: 2
+          period: 168h
+        - selector: '{env="stage"}'
+          priority: 3
+          period: 168h
+        - selector: '{type="jenkins-job-logs"}'
+          priority: 4
+          period: 168h
+
+      ingestion_rate_mb: 20
+      ingestion_burst_size_mb: 30
+
+      per_stream_rate_limit: 3MB
+      per_stream_rate_limit_burst: 10MB
+      max_streams_matchers_per_query: 400
+
+      max_query_series: 400
+      max_chunks_per_query: 700000
+
+    ## Ruler
+    ruler:
+      storage:
+        type: local
+        local:
+          directory: /etc/loki/rules
+      ring:
+        kvstore:
+          store: memberlist
+      rule_path: /tmp/loki/scratch
+      alertmanager_url: http://mimir-distributed-alertmanager.mimir.svc.cluster.local:8080
+      enable_api: true
+      enable_alertmanager_v2: true
+
+
+    ## Compactor
+    compactor:
+      shared_store: s3
+      retention_delete_delay: 2h
+      retention_enabled: true
+      working_directory: /data/retention
+
+    # Frontend Worker
+    frontend_worker:
+      scheduler_address: loki-distributed-query-scheduler:9095
+      match_max_concurrent: true
+      grpc_client_config:
+        max_recv_msg_size: 104857600  # 100 Mb
+        max_send_msg_size: 104857600  # 100 Mb
+        grpc_compression: snappy
+
+    query_scheduler:
+      max_outstanding_requests_per_tenant: 10000
+      grpc_client_config:
+        max_recv_msg_size: 104857600  # 100 Mb
+        max_send_msg_size: 104857600  # 100 Mb
+        grpc_compression: snappy
+
+    # Table Manager
+    table_manager:
+      retention_deletes_enabled: false
+
+    # Query Range
+    query_range:
+      align_queries_with_step: true
+      max_retries: 3
+      cache_results: true
+      results_cache:
+        cache:
+          embedded_cache:
+            enabled: true
+            max_size_mb: 1024
+            ttl: 24h
+
+    # Ingester
+    ingester:
+      lifecycler:
+        ring:
+          kvstore:
+            store: memberlist
+          replication_factor: 3
+
+      chunk_retain_period: 1m
+      chunk_idle_period: 2h
+      chunk_target_size: 1536000
+      max_chunk_age: 2h
+      chunk_block_size: 262144
+      chunk_encoding: snappy
+
+      wal:
+        dir: /var/loki/wal
+        enabled: true
+        replay_memory_ceiling: 10GB
+
+    # Ingester Client
+    ingester_client:
+      grpc_client_config:
+        # Message 크기 설정
+        max_recv_msg_size: 104857600  # 100 Mb
+        max_send_msg_size: 104857600  # 100 Mb
+        grpc_compression: snappy
+
+    #TODO: Querier CPU에 따라서 max_concurrent 조정 , CPU * 2 = max_concurrent
+    # Querier : 3 Core , 6GiB
+    querier:
+      query_timeout: 300s
+      max_concurrent: 7
+      engine:
+        timeout: 300s
+
+    ## frontend
+    frontend:
+      scheduler_address: loki-distributed-query-scheduler.loki.svc.cluster.local:9095
+      grpc_client_config:
+        max_recv_msg_size: 104857600  # 100 Mb
+        max_send_msg_size: 104857600  # 100 Mb
+        grpc_compression: snappy
+#      tail_proxy_url: http://loki-distributed-querier:9095
+#      downstream_url: http://loki-distributed-querier.monitoring.svc.cluster.local:3100
+
+    ## Distributor
+    distributor:
+      ring:
+        kvstore:
+          store: memberlist
 
 # -- Provides a reloadable runtime configuration file for some specific configuration
 runtimeConfig: {}
@@ -287,9 +375,9 @@ rbac:
 # ServiceMonitor configuration
 serviceMonitor:
   # -- If enabled, ServiceMonitor resources for Prometheus Operator are created
-  enabled: false
+  enabled: true
   # -- Alternative namespace for ServiceMonitor resources
-  namespace: null
+  namespace: loki
   # -- Namespace selector for ServiceMonitor resources
   namespaceSelector: {}
   # -- ServiceMonitor annotations
@@ -317,7 +405,7 @@ serviceMonitor:
 # Rules for the Prometheus Operator
 prometheusRule:
   # -- If enabled, a PrometheusRule resource for Prometheus Operator is created
-  enabled: false
+  enabled: true
   # -- Alternative namespace for the PrometheusRule resource
   namespace: null
   # -- PrometheusRule annotations
@@ -325,64 +413,64 @@ prometheusRule:
   # -- Additional PrometheusRule labels
   labels: {}
   # -- Contents of Prometheus rules file
-  groups: []
-  #  - name: loki_rules
-  #    rules:
-  #      - expr: histogram_quantile(0.99, sum(rate(loki_request_duration_seconds_bucket[1m]))
-  #          by (le, cluster, job))
-  #        record: cluster_job:loki_request_duration_seconds:99quantile
-  #      - expr: histogram_quantile(0.50, sum(rate(loki_request_duration_seconds_bucket[1m]))
-  #          by (le, cluster, job))
-  #        record: cluster_job:loki_request_duration_seconds:50quantile
-  #      - expr: sum(rate(loki_request_duration_seconds_sum[1m])) by (cluster, job) / sum(rate(loki_request_duration_seconds_count[1m]))
-  #          by (cluster, job)
-  #        record: cluster_job:loki_request_duration_seconds:avg
-  #      - expr: sum(rate(loki_request_duration_seconds_bucket[1m])) by (le, cluster, job)
-  #        record: cluster_job:loki_request_duration_seconds_bucket:sum_rate
-  #      - expr: sum(rate(loki_request_duration_seconds_sum[1m])) by (cluster, job)
-  #        record: cluster_job:loki_request_duration_seconds_sum:sum_rate
-  #      - expr: sum(rate(loki_request_duration_seconds_count[1m])) by (cluster, job)
-  #        record: cluster_job:loki_request_duration_seconds_count:sum_rate
-  #      - expr: histogram_quantile(0.99, sum(rate(loki_request_duration_seconds_bucket[1m]))
-  #          by (le, cluster, job, route))
-  #        record: cluster_job_route:loki_request_duration_seconds:99quantile
-  #      - expr: histogram_quantile(0.50, sum(rate(loki_request_duration_seconds_bucket[1m]))
-  #          by (le, cluster, job, route))
-  #        record: cluster_job_route:loki_request_duration_seconds:50quantile
-  #      - expr: sum(rate(loki_request_duration_seconds_sum[1m])) by (cluster, job, route)
-  #          / sum(rate(loki_request_duration_seconds_count[1m])) by (cluster, job, route)
-  #        record: cluster_job_route:loki_request_duration_seconds:avg
-  #      - expr: sum(rate(loki_request_duration_seconds_bucket[1m])) by (le, cluster, job,
-  #          route)
-  #        record: cluster_job_route:loki_request_duration_seconds_bucket:sum_rate
-  #      - expr: sum(rate(loki_request_duration_seconds_sum[1m])) by (cluster, job, route)
-  #        record: cluster_job_route:loki_request_duration_seconds_sum:sum_rate
-  #      - expr: sum(rate(loki_request_duration_seconds_count[1m])) by (cluster, job, route)
-  #        record: cluster_job_route:loki_request_duration_seconds_count:sum_rate
-  #      - expr: histogram_quantile(0.99, sum(rate(loki_request_duration_seconds_bucket[1m]))
-  #          by (le, cluster, namespace, job, route))
-  #        record: cluster_namespace_job_route:loki_request_duration_seconds:99quantile
-  #      - expr: histogram_quantile(0.50, sum(rate(loki_request_duration_seconds_bucket[1m]))
-  #          by (le, cluster, namespace, job, route))
-  #        record: cluster_namespace_job_route:loki_request_duration_seconds:50quantile
-  #      - expr: sum(rate(loki_request_duration_seconds_sum[1m])) by (cluster, namespace,
-  #          job, route) / sum(rate(loki_request_duration_seconds_count[1m])) by (cluster,
-  #          namespace, job, route)
-  #        record: cluster_namespace_job_route:loki_request_duration_seconds:avg
-  #      - expr: sum(rate(loki_request_duration_seconds_bucket[1m])) by (le, cluster, namespace,
-  #          job, route)
-  #        record: cluster_namespace_job_route:loki_request_duration_seconds_bucket:sum_rate
-  #      - expr: sum(rate(loki_request_duration_seconds_sum[1m])) by (cluster, namespace,
-  #          job, route)
-  #        record: cluster_namespace_job_route:loki_request_duration_seconds_sum:sum_rate
-  #      - expr: sum(rate(loki_request_duration_seconds_count[1m])) by (cluster, namespace,
-  #          job, route)
-  #        record: cluster_namespace_job_route:loki_request_duration_seconds_count:sum_rate
+  groups:
+    - name: loki_rules
+      rules:
+        - expr: histogram_quantile(0.99, sum(rate(loki_request_duration_seconds_bucket[1m]))
+            by (le, cluster, job))
+          record: cluster_job:loki_request_duration_seconds:99quantile
+        - expr: histogram_quantile(0.50, sum(rate(loki_request_duration_seconds_bucket[1m]))
+            by (le, cluster, job))
+          record: cluster_job:loki_request_duration_seconds:50quantile
+        - expr: sum(rate(loki_request_duration_seconds_sum[1m])) by (cluster, job) / sum(rate(loki_request_duration_seconds_count[1m]))
+            by (cluster, job)
+          record: cluster_job:loki_request_duration_seconds:avg
+        - expr: sum(rate(loki_request_duration_seconds_bucket[1m])) by (le, cluster, job)
+          record: cluster_job:loki_request_duration_seconds_bucket:sum_rate
+        - expr: sum(rate(loki_request_duration_seconds_sum[1m])) by (cluster, job)
+          record: cluster_job:loki_request_duration_seconds_sum:sum_rate
+        - expr: sum(rate(loki_request_duration_seconds_count[1m])) by (cluster, job)
+          record: cluster_job:loki_request_duration_seconds_count:sum_rate
+        - expr: histogram_quantile(0.99, sum(rate(loki_request_duration_seconds_bucket[1m]))
+            by (le, cluster, job, route))
+          record: cluster_job_route:loki_request_duration_seconds:99quantile
+        - expr: histogram_quantile(0.50, sum(rate(loki_request_duration_seconds_bucket[1m]))
+            by (le, cluster, job, route))
+          record: cluster_job_route:loki_request_duration_seconds:50quantile
+        - expr: sum(rate(loki_request_duration_seconds_sum[1m])) by (cluster, job, route)
+            / sum(rate(loki_request_duration_seconds_count[1m])) by (cluster, job, route)
+          record: cluster_job_route:loki_request_duration_seconds:avg
+        - expr: sum(rate(loki_request_duration_seconds_bucket[1m])) by (le, cluster, job,
+            route)
+          record: cluster_job_route:loki_request_duration_seconds_bucket:sum_rate
+        - expr: sum(rate(loki_request_duration_seconds_sum[1m])) by (cluster, job, route)
+          record: cluster_job_route:loki_request_duration_seconds_sum:sum_rate
+        - expr: sum(rate(loki_request_duration_seconds_count[1m])) by (cluster, job, route)
+          record: cluster_job_route:loki_request_duration_seconds_count:sum_rate
+        - expr: histogram_quantile(0.99, sum(rate(loki_request_duration_seconds_bucket[1m]))
+            by (le, cluster, namespace, job, route))
+          record: cluster_namespace_job_route:loki_request_duration_seconds:99quantile
+        - expr: histogram_quantile(0.50, sum(rate(loki_request_duration_seconds_bucket[1m]))
+            by (le, cluster, namespace, job, route))
+          record: cluster_namespace_job_route:loki_request_duration_seconds:50quantile
+        - expr: sum(rate(loki_request_duration_seconds_sum[1m])) by (cluster, namespace,
+            job, route) / sum(rate(loki_request_duration_seconds_count[1m])) by (cluster,
+            namespace, job, route)
+          record: cluster_namespace_job_route:loki_request_duration_seconds:avg
+        - expr: sum(rate(loki_request_duration_seconds_bucket[1m])) by (le, cluster, namespace,
+            job, route)
+          record: cluster_namespace_job_route:loki_request_duration_seconds_bucket:sum_rate
+        - expr: sum(rate(loki_request_duration_seconds_sum[1m])) by (cluster, namespace,
+            job, route)
+          record: cluster_namespace_job_route:loki_request_duration_seconds_sum:sum_rate
+        - expr: sum(rate(loki_request_duration_seconds_count[1m])) by (cluster, namespace,
+            job, route)
+          record: cluster_namespace_job_route:loki_request_duration_seconds_count:sum_rate
 
 # Configuration for the ingester
 ingester:
   # -- Kind of deployment [StatefulSet/Deployment]
-  kind: Deployment
+  kind: StatefulSet
   # -- Number of replicas for the ingester
   replicas: 3
   autoscaling:
@@ -426,9 +514,10 @@ ingester:
   # -- Resource requests and limits for the ingester
   resources:
     requests:
-      memory: 3000Mi
+      cpu: 1500m
+      memory: 12000Mi
     limits:
-      memory: 3000Mi
+      memory: 12000Mi
   # -- Containers to add to the ingester pods
   extraContainers: []
   # -- Init containers to add to the ingester pods
@@ -449,28 +538,28 @@ ingester:
   # -- Affinity for ingester pods. Passed through `tpl` and, thus, to be configured as string
   # @default -- Hard node and soft zone anti-affinity
   affinity: |
-    nodeAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        nodeSelectorTerms:
-          - matchExpressions:
-              - key: topology.kubernetes.io/zone
-                operator: In
-                values:
-                  - "ap-northeast-2a"
     podAntiAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         - labelSelector:
-            matchLabels:
-              {{- include "loki.ingesterSelectorLabels" . | nindent 10 }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values: 
+                  - ingester
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - loki-distributed
           topologyKey: kubernetes.io/hostname
+
   # -- Pod Disruption Budget maxUnavailable
   maxUnavailable: 1
   # -- Node selector for ingester pods
   nodeSelector:
-    role: infra-m
+    role: infra-r
     topology.kubernetes.io/zone: ap-northeast-2a
     kubernetes.io/arch: arm64
-    karpenter.sh/capacity-type: spot
+    karpenter.sh/capacity-type: on-demand
   # -- Tolerations for ingester pods
   tolerations: []
   # -- readiness probe settings for ingester pods. If empty, use `loki.readinessProbe`
@@ -479,12 +568,25 @@ ingester:
   livenessProbe: {}
   persistence:
     # -- Enable creating PVCs which is required when using boltdb-shipper
-    enabled: false
+    enabled: true
+    # -- Use emptyDir with ramdisk for storage. **Please note that all data in ingester will be lost on pod restart**
+    inMemory: false
+    # -- Size of persistent or memory disk
+    size: 30Gi
+    # -- Storage class to be used.
+    # If defined, storageClassName: <storageClass>.
+    # If set to "-", storageClassName: "", which disables dynamic provisioning.
+    # If empty or set to null, no storageClassName spec is
+    # set, choosing the default provisioner (gp2 on AWS, standard on GKE, AWS, and OpenStack).
+    storageClass: gp3
+    # -- Annotations for ingester PVCs
+    annotations: {}
 
   # -- Adds the appProtocol field to the ingester service. This allows ingester to work with istio protocol selection.
   appProtocol:
     # -- Set the optional grpc service protocol. Ex: "grpc", "http2" or "https"
     grpc: ""
+
 
 # Configuration for the distributor
 distributor:
@@ -493,14 +595,7 @@ distributor:
   autoscaling:
     # -- Enable autoscaling for the distributor
     enabled: false
-    # -- Minimum autoscaling replicas for the distributor
-    minReplicas: 1
-    # -- Maximum autoscaling replicas for the distributor
-    maxReplicas: 3
-    # -- Target CPU utilisation percentage for the distributor
-    targetCPUUtilizationPercentage: 60
-    # -- Target memory utilisation percentage for the distributor
-    targetMemoryUtilizationPercentage:
+
   image:
     # -- The Docker registry for the distributor image. Overrides `loki.image.registry`
     registry: null
@@ -531,11 +626,10 @@ distributor:
   # -- Resource requests and limits for the distributor
   resources:
     requests:
-      cpu: 150m
-      memory: 500Mi
+      cpu: 200m
+      memory: 400Mi
     limits:
-      cpu: 600m
-      memory: 500Mi
+      memory: 600Mi
   # -- Containers to add to the distributor pods
   extraContainers: []
   # -- Grace period to allow the distributor to shutdown before it is killed
@@ -546,17 +640,24 @@ distributor:
     podAntiAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         - labelSelector:
-            matchLabels:
-              {{- include "loki.distributorSelectorLabels" . | nindent 10 }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values: 
+                  - distributor
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - loki-distributed
           topologyKey: kubernetes.io/hostname
   # -- Pod Disruption Budget maxUnavailable
   maxUnavailable: 1
   # -- Node selector for distributor pods
   nodeSelector:
-    role: infra-m
+    role: infra-c
     topology.kubernetes.io/zone: ap-northeast-2a
     kubernetes.io/arch: arm64
-    karpenter.sh/capacity-type: spot
+#    karpenter.sh/capacity-type: spot
   # -- Tolerations for distributor pods
   tolerations: []
   # -- Adds the appProtocol field to the distributor service. This allows distributor to work with istio protocol selection.
@@ -602,9 +703,10 @@ querier:
   # -- Resource requests and limits for the querier
   resources:
     requests:
-      memory: 3000Mi
+      cpu: 2000m
+      memory: 4000Mi
     limits:
-      memory: 3000Mi
+      memory: 5500Mi
   # -- Containers to add to the querier pods
   extraContainers: []
   # -- Init containers to add to the querier pods
@@ -613,50 +715,37 @@ querier:
   terminationGracePeriodSeconds: 30
   # -- topologySpread for querier pods. Passed through `tpl` and, thus, to be configured as string
   # @default -- Defaults to allow skew no more then 1 node per AZ
-  topologySpreadConstraints: |
-    - maxSkew: 1
-      topologyKey: kubernetes.io/hostname
-      whenUnsatisfiable: ScheduleAnyway
-      labelSelector:
-        matchLabels:
-          {{- include "loki.querierSelectorLabels" . | nindent 6 }}
+  topologySpreadConstraints: {}
   # -- Affinity for querier pods. Passed through `tpl` and, thus, to be configured as string
   # @default -- Hard node and soft zone anti-affinity
-  affinity: |
-    podAntiAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        - labelSelector:
-            matchLabels:
-              {{- include "loki.querierSelectorLabels" . | nindent 10 }}
-          topologyKey: kubernetes.io/hostname
+  affinity: {}
   # -- Pod Disruption Budget maxUnavailable
   maxUnavailable: 1
   # -- Node selector for querier pods
   nodeSelector:
-    role: infra-m
+    role: infra-c
     topology.kubernetes.io/zone: ap-northeast-2a
     kubernetes.io/arch: arm64
-    karpenter.sh/capacity-type: spot
+#    karpenter.sh/capacity-type: spot
   # -- Tolerations for querier pods
   tolerations: []
   # -- DNSConfig for querier pods
   dnsConfig: {}
   persistence:
-    # -- Enable creating PVCs for the querier cache
     enabled: false
 
   appProtocol:
     # -- Set the optional grpc service protocol. Ex: "grpc", "http2" or "https"
     grpc: ""
 
+
 # Configuration for the query-frontend
 queryFrontend:
   # -- Number of replicas for the query-frontend
-  replicas: 2
+  replicas: 3
   autoscaling:
     # -- Enable autoscaling for the query-frontend
     enabled: false
-
   image:
     # -- The Docker registry for the query-frontend image. Overrides `loki.image.registry`
     registry: null
@@ -687,39 +776,25 @@ queryFrontend:
   # -- Resource requests and limits for the query-frontend
   resources:
     requests:
-      cpu: 150m
-      memory: 600Mi
+      cpu: 400m
+      memory: 800Mi
     limits:
-      cpu: 1000m
-      memory: 600Mi
+      memory: 1500Mi
   # -- Containers to add to the query-frontend pods
   extraContainers: []
   # -- Grace period to allow the query-frontend to shutdown before it is killed
   terminationGracePeriodSeconds: 30
   # -- Affinity for query-frontend pods. Passed through `tpl` and, thus, to be configured as string
   # @default -- Hard node and soft zone anti-affinity
-  affinity: |
-    podAntiAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        - labelSelector:
-            matchLabels:
-              {{- include "loki.queryFrontendSelectorLabels" . | nindent 10 }}
-          topologyKey: kubernetes.io/hostname
-      preferredDuringSchedulingIgnoredDuringExecution:
-        - weight: 100
-          podAffinityTerm:
-            labelSelector:
-              matchLabels:
-                {{- include "loki.queryFrontendSelectorLabels" . | nindent 12 }}
-            topologyKey: failure-domain.beta.kubernetes.io/zone
+  affinity: {}
   # -- Pod Disruption Budget maxUnavailable
   maxUnavailable: 1
   # -- Node selector for query-frontend pods
   nodeSelector:
-    role: infra-t
+    role: infra-c
     topology.kubernetes.io/zone: ap-northeast-2a
     kubernetes.io/arch: arm64
-    karpenter.sh/capacity-type: spot
+#    karpenter.sh/capacity-type: spot
   # -- Tolerations for query-frontend pods
   tolerations: []
   # -- Adds the appProtocol field to the queryFrontend service. This allows queryFrontend to work with istio protocol selection.
@@ -730,18 +805,73 @@ queryFrontend:
 # Configuration for the query-scheduler
 queryScheduler:
   # -- Specifies whether the query-scheduler should be decoupled from the query-frontend
-  enabled: false
+  enabled: true
+  # -- Number of replicas for the query-scheduler.
+  # It should be lower than `-querier.max-concurrent` to avoid generating back-pressure in queriers;
+  # it's also recommended that this value evenly divides the latter
+  replicas: 2
+  image:
+    # -- The Docker registry for the query-scheduler image. Overrides `loki.image.registry`
+    registry: null
+    # -- Docker image repository for the query-scheduler image. Overrides `loki.image.repository`
+    repository: null
+    # -- Docker image tag for the query-scheduler image. Overrides `loki.image.tag`
+    tag: null
+  # -- The name of the PriorityClass for query-scheduler pods
+  priorityClassName: null
+  # -- Labels for query-scheduler pods
+  podLabels: {}
+  # -- Annotations for query-scheduler pods
+  podAnnotations: {}
+  # -- Labels for query-scheduler service
+  serviceLabels: {}
+  # -- Additional CLI args for the query-scheduler
+  extraArgs: []
+  # -- Environment variables to add to the query-scheduler pods
+  extraEnv: []
+  # -- Environment variables from secrets or configmaps to add to the query-scheduler pods
+  extraEnvFrom: []
+  # -- Volume mounts to add to the query-scheduler pods
+  extraVolumeMounts: []
+  # -- Volumes to add to the query-scheduler pods
+  extraVolumes: []
+  # -- Resource requests and limits for the query-scheduler
+  resources:
+    requests:
+      cpu: 70m
+      memory: 150Mi
+    limits:
+      memory: 300Mi
+  # -- Containers to add to the query-scheduler pods
+  extraContainers: []
+  # -- Grace period to allow the query-scheduler to shutdown before it is killed
+  terminationGracePeriodSeconds: 30
+  # -- Affinity for query-scheduler pods. Passed through `tpl` and, thus, to be configured as string
+  # @default -- Hard node and soft zone anti-affinity
+  affinity: |
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values: 
+                  - query-scheduler
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - loki-distributed
+          topologyKey: kubernetes.io/hostname
 
-# Configuration for the table-manager
-tableManager:
-  # -- Specifies whether the table-manager should be enabled
-  enabled: false
+  # -- Pod Disruption Budget maxUnavailable
+  maxUnavailable: 1
+  # -- Node selector for query-scheduler pods
+  nodeSelector:
+    role: infra-c
+    topology.kubernetes.io/zone: ap-northeast-2a
+    kubernetes.io/arch: arm64
+#    karpenter.sh/capacity-type: spot
 
-# Use either this ingress or the gateway, but not both at once.
-# If you enable this, make sure to disable the gateway.
-# You'll need to supply authn configuration for your ingress controller.
-ingress:
-  enabled: false
 
 # Configuration for the gateway
 gateway:
@@ -807,8 +937,8 @@ gateway:
   # -- Resource requests and limits for the gateway
   resources:
     requests:
-      cpu: 50m
-      memory: 200Mi
+      cpu: 25m
+      memory: 100Mi
     limits:
       memory: 200Mi
 
@@ -822,9 +952,17 @@ gateway:
     podAntiAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         - labelSelector:
-            matchLabels:
-              {{- include "loki.gatewaySelectorLabels" . | nindent 10 }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values:
+                  - gateway
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - loki-distributed
           topologyKey: kubernetes.io/hostname
+
   # -- Pod Disruption Budget maxUnavailable
   maxUnavailable: 1
   # -- Node selector for gateway pods
@@ -832,7 +970,7 @@ gateway:
     role: infra-t
     topology.kubernetes.io/zone: ap-northeast-2a
     kubernetes.io/arch: arm64
-    karpenter.sh/capacity-type: spot
+#    karpenter.sh/capacity-type: spot
   # -- Tolerations for gateway pods
   tolerations: []
   # -- DNSConfig for gateway pods
@@ -932,9 +1070,11 @@ gateway:
                     '"server_protocol": "$server_protocol"' # request protocol, like HTTP/1.1 or HTTP/2.0
                     '}';
     # -- Allows appending custom configuration to the server block
-    serverSnippet: ""
+    serverSnippet: |-
+      client_max_body_size 80M;
     # -- Allows appending custom configuration to the http block
-    httpSnippet: ""
+    httpSnippet: |-
+      client_max_body_size 80M;
     # -- Allows overriding the DNS resolver address nginx will use.
     resolver: ""
     # -- Config file contents for Nginx. Passed through the `tpl` function to allow templating
@@ -1081,7 +1221,20 @@ compactor:
   # -- Annotations for compactor pods
   podAnnotations: {}
   # -- Specify the compactor affinity
-  affinity: {}
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values:
+                  - compactor
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - loki-distributed
+          topologyKey: kubernetes.io/hostname
   # -- Labels for compactor service
   serviceLabels: {}
   # -- Additional CLI args for the compactor
@@ -1100,7 +1253,7 @@ compactor:
       cpu: 150m
       memory: 500Mi
     limits:
-      memory: 500Mi
+      memory: 1000Mi
   # -- Containers to add to the compactor pods
   extraContainers: []
   # -- Init containers to add to the compactor pods
@@ -1112,7 +1265,7 @@ compactor:
     role: infra-t
     topology.kubernetes.io/zone: ap-northeast-2a
     kubernetes.io/arch: arm64
-    karpenter.sh/capacity-type: spot
+#    karpenter.sh/capacity-type: spot
   # -- Tolerations for compactor pods
   tolerations: []
   persistence:
@@ -1136,9 +1289,9 @@ compactor:
 # Configuration for the ruler
 ruler:
   # -- Specifies whether the ruler should be enabled
-  enabled: false
+  enabled: true
   # -- Kind of deployment [StatefulSet/Deployment]
-  kind: Deployment
+  kind: StatefulSet
   # -- Number of replicas for the ruler
   replicas: 1
   image:
@@ -1169,7 +1322,12 @@ ruler:
   # -- Volumes to add to the ruler pods
   extraVolumes: []
   # -- Resource requests and limits for the ruler
-  resources: {}
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2000Mi
+    limits:
+      memory: 2000Mi
   # -- Containers to add to the ruler pods
   extraContainers: []
   # -- Init containers to add to the ruler pods
@@ -1182,27 +1340,31 @@ ruler:
     podAntiAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         - labelSelector:
-            matchLabels:
-              {{- include "loki.rulerSelectorLabels" . | nindent 10 }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values:
+                  - ruler
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - loki-distributed
           topologyKey: kubernetes.io/hostname
-      preferredDuringSchedulingIgnoredDuringExecution:
-        - weight: 100
-          podAffinityTerm:
-            labelSelector:
-              matchLabels:
-                {{- include "loki.rulerSelectorLabels" . | nindent 12 }}
-            topologyKey: failure-domain.beta.kubernetes.io/zone
   # -- Pod Disruption Budget maxUnavailable
   maxUnavailable: null
   # -- Node selector for ruler pods
-  nodeSelector: {}
+  nodeSelector:
+    role: infra-t
+    topology.kubernetes.io/zone: ap-northeast-2a
+    kubernetes.io/arch: arm64
+#    karpenter.sh/capacity-type: spot
   # -- Tolerations for ruler pods
   tolerations: []
   # -- DNSConfig for ruler pods
   dnsConfig: {}
   persistence:
     # -- Enable creating PVCs which is required when using recording rules
-    enabled: false
+    enabled: true
     # -- Size of persistent disk
     size: 10Gi
     # -- Storage class to be used.
@@ -1210,82 +1372,31 @@ ruler:
     # If set to "-", storageClassName: "", which disables dynamic provisioning.
     # If empty or set to null, no storageClassName spec is
     # set, choosing the default provisioner (gp2 on AWS, standard on GKE, AWS, and OpenStack).
-    storageClass: null
+    storageClass: gp3
     # -- Annotations for ruler PVCs
     annotations: {}
   # -- Directories containing rules files
-  directories: {}
-    # tenant_foo:
-    #   rules1.txt: |
-    #     groups:
-    #       - name: should_fire
-    #         rules:
-    #           - alert: HighPercentageError
-    #             expr: |
-    #               sum(rate({app="foo", env="production"} |= "error" [5m])) by (job)
-    #                 /
-    #               sum(rate({app="foo", env="production"}[5m])) by (job)
-    #                 > 0.05
-    #             for: 10m
-    #             labels:
-    #               severity: warning
-    #             annotations:
-    #               summary: High error rate
-    #       - name: credentials_leak
-    #         rules:
-    #           - alert: http-credentials-leaked
-    #             annotations:
-    #               message: "{{ $labels.job }} is leaking http basic auth credentials."
-    #             expr: 'sum by (cluster, job, pod) (count_over_time({namespace="prod"} |~ "http(s?)://(\\w+):(\\w+)@" [5m]) > 0)'
-    #             for: 10m
-    #             labels:
-    #               severity: critical
-    #   rules2.txt: |
-    #     groups:
-    #       - name: example
-    #         rules:
-    #         - alert: HighThroughputLogStreams
-    #           expr: sum by(container) (rate({job=~"loki-dev/.*"}[1m])) > 1000
-    #           for: 2m
-    # tenant_bar:
-    #   rules1.txt: |
-    #     groups:
-    #       - name: should_fire
-    #         rules:
-    #           - alert: HighPercentageError
-    #             expr: |
-    #               sum(rate({app="foo", env="production"} |= "error" [5m])) by (job)
-    #                 /
-    #               sum(rate({app="foo", env="production"}[5m])) by (job)
-    #                 > 0.05
-    #             for: 10m
-    #             labels:
-    #               severity: warning
-    #             annotations:
-    #               summary: High error rate
-    #       - name: credentials_leak
-    #         rules:
-    #           - alert: http-credentials-leaked
-    #             annotations:
-    #               message: "{{ $labels.job }} is leaking http basic auth credentials."
-    #             expr: 'sum by (cluster, job, pod) (count_over_time({namespace="prod"} |~ "http(s?)://(\\w+):(\\w+)@" [5m]) > 0)'
-    #             for: 10m
-    #             labels:
-    #               severity: critical
-    #   rules2.txt: |
-    #     groups:
-    #       - name: example
-    #         rules:
-    #         - alert: HighThroughputLogStreams
-    #           expr: sum by(container) (rate({job=~"loki-dev/.*"}[1m])) > 1000
-  #           for: 2m
+  directories:
+    fake:
+      loki-rules: |
+        groups:
+          - name: global_query_caching
+            rules:
+              - alert: global_query_caching
+                expr: |
+                  count_over_time({source="vector", env="prod"} |~ `ERROR|error` [1m]) > 1000
+                for: 1m
+                labels:
+                  severity: warning
+                annotations:
+                  summary: Global Query Caching
 
 # Configuration for the index-gateway
 indexGateway:
   # -- Specifies whether the index-gateway should be enabled
   enabled: true
   # -- Number of replicas for the index-gateway
-  replicas: 1
+  replicas: 2
   image:
     # -- The Docker registry for the index-gateway image. Overrides `loki.image.registry`
     registry: null
@@ -1314,8 +1425,8 @@ indexGateway:
   # -- Resource requests and limits for the index-gateway
   resources:
     requests:
-      cpu: 100m
-      memory: 400Mi
+      cpu: 50m
+      memory: 200Mi
     limits:
       memory: 400Mi
   # -- Containers to add to the index-gateway pods
@@ -1330,24 +1441,24 @@ indexGateway:
     podAntiAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         - labelSelector:
-            matchLabels:
-              {{- include "loki.indexGatewaySelectorLabels" . | nindent 10 }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values:
+                  - index-gateway
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - loki-distributed
           topologyKey: kubernetes.io/hostname
-      preferredDuringSchedulingIgnoredDuringExecution:
-        - weight: 100
-          podAffinityTerm:
-            labelSelector:
-              matchLabels:
-                {{- include "loki.indexGatewaySelectorLabels" . | nindent 12 }}
-            topologyKey: failure-domain.beta.kubernetes.io/zone
   # -- Pod Disruption Budget maxUnavailable
-  maxUnavailable: null
+  maxUnavailable: 1
   # -- Node selector for index-gateway pods
   nodeSelector:
     role: infra-t
     topology.kubernetes.io/zone: ap-northeast-2a
     kubernetes.io/arch: arm64
-    karpenter.sh/capacity-type: spot
+#    karpenter.sh/capacity-type: spot
   # -- Tolerations for index-gateway pods
   tolerations: []
   persistence:
